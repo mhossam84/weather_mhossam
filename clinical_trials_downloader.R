@@ -21,11 +21,11 @@ BASE_API_URL <- "https://clinicaltrials.gov/api/v2/studies"
 CDN_BASE_URL <- "https://cdn.clinicaltrials.gov/large-docs"
 API_HEADERS  <- add_headers(`User-Agent` = "ClinicalTrialsDocDownloader/1.0 (R research tool)")
 
-DOC_FILTERS <- list(
-  protocol = "AREA[LargeDocHasProtocol]true",
-  sap      = "AREA[LargeDocHasSAP]true",
-  icf      = "AREA[LargeDocHasICF]true"
-)
+# aggFilters values used by the ClinicalTrials.gov API v2
+DOC_AGG_CODES <- list(protocol = "prot", sap = "sap", icf = "icf")
+
+# Fields to request so largeDocumentModule is included in every response
+API_FIELDS <- "NCTId,BriefTitle,LeadSponsorName,LargeDocumentModule"
 
 DOC_TYPE_LABELS <- c(
   Prot         = "Protocol",
@@ -78,7 +78,7 @@ get_study_by_nct_id <- function(nct_id) {
   url    <- paste0(BASE_API_URL, "/", nct_id)
 
   resp <- tryCatch(
-    GET(url, API_HEADERS, query = list(format = "json"), timeout(30)),
+    GET(url, API_HEADERS, query = list(format = "json", fields = API_FIELDS), timeout(30)),
     error = function(e) { message("Request failed: ", e$message); NULL }
   )
   if (is.null(resp) || http_error(resp)) {
@@ -105,13 +105,14 @@ search_studies_with_documents <- function(
     doc_types    = "protocol",
     max_studies  = 10
 ) {
-  filter_exprs   <- unlist(DOC_FILTERS[doc_types], use.names = FALSE)
-  advanced_filter <- paste(filter_exprs, collapse = " OR ")
+  agg_codes <- unlist(DOC_AGG_CODES[doc_types], use.names = FALSE)
+  agg_filter <- paste0("docs:", paste(agg_codes, collapse = ","))
 
   query <- list(
-    format            = "json",
-    pageSize          = min(max_studies, 100),
-    "filter.advanced" = advanced_filter
+    format     = "json",
+    pageSize   = min(max_studies, 100),
+    aggFilters = agg_filter,
+    fields     = API_FIELDS
   )
   if (!is.null(condition))    query[["query.cond"]]  <- condition
   if (!is.null(intervention)) query[["query.intr"]]  <- intervention
