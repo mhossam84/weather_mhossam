@@ -105,51 +105,56 @@ search_studies_with_documents <- function(
     doc_types    = "protocol",
     max_studies  = Inf
 ) {
-  agg_codes  <- unlist(DOC_AGG_CODES[doc_types], use.names = FALSE)
-  agg_filter <- paste0("docs:", paste(agg_codes, collapse = ","))
+  agg_codes <- unlist(DOC_AGG_CODES[doc_types], use.names = FALSE)
 
-  query <- list(
-    format     = "json",
-    pageSize   = 100,
-    aggFilters = agg_filter
-  )
-  if (!is.null(condition))    query[["query.cond"]]  <- condition
-  if (!is.null(intervention)) query[["query.intr"]]  <- intervention
-  if (!is.null(sponsor))      query[["query.spons"]] <- sponsor
+  base_query <- list(format = "json", pageSize = 100)
+  if (!is.null(condition))    base_query[["query.cond"]]  <- condition
+  if (!is.null(intervention)) base_query[["query.intr"]]  <- intervention
+  if (!is.null(sponsor))      base_query[["query.spons"]] <- sponsor
 
-  # Phase 1: paginate through search results to collect NCT IDs
-  nct_ids    <- character(0)
-  page_token <- NULL
+  # Phase 1: one search per doc type (API rejects combined aggFilters like docs:prot,sap,icf)
+  # Merge and deduplicate NCT IDs across all searches.
+  nct_ids <- character(0)
 
-  repeat {
+  for (code in agg_codes) {
+    query      <- c(base_query, list(aggFilters = paste0("docs:", code)))
+    page_token <- NULL
+    type_ids   <- character(0)
+
+    repeat {
+      if (length(nct_ids) + length(type_ids) >= max_studies) break
+      if (!is.null(page_token)) query[["pageToken"]] <- page_token
+
+      resp <- tryCatch(
+        GET(BASE_API_URL, API_HEADERS, query = query, timeout(30)),
+        error = function(e) { message("Request failed: ", e$message); NULL }
+      )
+      if (is.null(resp) || http_error(resp)) {
+        message("API error (docs:", code, "): HTTP ", status_code(resp)); break
+      }
+
+      data <- fromJSON(content(resp, "text", encoding = "UTF-8"), simplifyVector = FALSE)
+
+      if (length(type_ids) == 0) {
+        message("  docs:", code, " — API reports ", data$totalCount %||% "?", " studies.")
+      }
+
+      for (raw in data$studies %||% list()) {
+        id <- raw$protocolSection$identificationModule$nctId %||% ""
+        if (nchar(id) > 0) type_ids <- c(type_ids, id)
+      }
+
+      page_token <- data$nextPageToken
+      if (is.null(page_token)) break
+      Sys.sleep(0.3)
+    }
+
+    nct_ids <- unique(c(nct_ids, type_ids))
     if (length(nct_ids) >= max_studies) break
-    if (!is.null(page_token)) query[["pageToken"]] <- page_token
-
-    resp <- tryCatch(
-      GET(BASE_API_URL, API_HEADERS, query = query, timeout(30)),
-      error = function(e) { message("Request failed: ", e$message); NULL }
-    )
-    if (is.null(resp) || http_error(resp)) {
-      message("API error: HTTP ", status_code(resp)); break
-    }
-
-    data  <- fromJSON(content(resp, "text", encoding = "UTF-8"), simplifyVector = FALSE)
-
-    if (length(nct_ids) == 0) {
-      total <- data$totalCount %||% "?"
-      message("  API reports ", total, " matching studies total.")
-    }
-
-    for (raw in data$studies %||% list()) {
-      id <- raw$protocolSection$identificationModule$nctId %||% ""
-      if (nchar(id) > 0) nct_ids <- c(nct_ids, id)
-      if (length(nct_ids) >= max_studies) break
-    }
-
-    page_token <- data$nextPageToken
-    if (is.null(page_token)) break
-    Sys.sleep(0.3)
   }
+
+  nct_ids <- nct_ids[seq_len(min(length(nct_ids), max_studies))]
+  message("  Total unique studies across all doc types: ", length(nct_ids))
 
   if (length(nct_ids) == 0) return(list())
 
