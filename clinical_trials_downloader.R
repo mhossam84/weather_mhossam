@@ -128,10 +128,20 @@ search_studies_with_documents <- function(
 
   data  <- fromJSON(content(resp, "text", encoding = "UTF-8"), simplifyVector = FALSE)
   batch <- data$studies %||% list()
+  batch <- batch[seq_len(min(length(batch), max_studies))]
 
-  # aggFilters already guarantees these studies have the requested doc types;
-  # parse and return without re-checking docs (avoids infinite pagination)
-  lapply(batch[seq_len(min(length(batch), max_studies))], .parse_study)
+  # Phase 2: the search endpoint returns trimmed data (no largeDocumentModule).
+  # Re-fetch each study individually to get the full record including doc metadata.
+  message("  Fetching full records for ", length(batch), " study/studies ...")
+  studies <- list()
+  for (raw in batch) {
+    nct_id <- raw$protocolSection$identificationModule$nctId %||% ""
+    if (nchar(nct_id) == 0) next
+    full <- get_study_by_nct_id(nct_id)
+    if (!is.null(full)) studies <- c(studies, list(full))
+    Sys.sleep(0.3)
+  }
+  studies
 }
 
 # ---------------------------------------------------------------------------
