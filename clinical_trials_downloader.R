@@ -24,8 +24,8 @@ API_HEADERS  <- add_headers(`User-Agent` = "ClinicalTrialsDocDownloader/1.0 (R r
 # aggFilters values used by the ClinicalTrials.gov API v2
 DOC_AGG_CODES <- list(protocol = "prot", sap = "sap", icf = "icf")
 
-# Fields to request so largeDocumentModule is included in every response
-API_FIELDS <- "NCTId,BriefTitle,LeadSponsorName,LargeDocumentModule"
+# Fields to request — omit to get full response including largeDocumentModule
+API_FIELDS <- NULL
 
 DOC_TYPE_LABELS <- c(
   Prot         = "Protocol",
@@ -78,7 +78,7 @@ get_study_by_nct_id <- function(nct_id) {
   url    <- paste0(BASE_API_URL, "/", nct_id)
 
   resp <- tryCatch(
-    GET(url, API_HEADERS, query = list(format = "json", fields = API_FIELDS), timeout(30)),
+    GET(url, API_HEADERS, query = list(format = "json"), timeout(30)),
     error = function(e) { message("Request failed: ", e$message); NULL }
   )
   if (is.null(resp) || http_error(resp)) {
@@ -105,52 +105,33 @@ search_studies_with_documents <- function(
     doc_types    = "protocol",
     max_studies  = 10
 ) {
-  agg_codes <- unlist(DOC_AGG_CODES[doc_types], use.names = FALSE)
+  agg_codes  <- unlist(DOC_AGG_CODES[doc_types], use.names = FALSE)
   agg_filter <- paste0("docs:", paste(agg_codes, collapse = ","))
 
   query <- list(
     format     = "json",
-    pageSize   = min(max_studies, 100),
-    aggFilters = agg_filter,
-    fields     = API_FIELDS
+    pageSize   = min(max_studies, 100),  # fetch exactly what we need in one call
+    aggFilters = agg_filter
   )
   if (!is.null(condition))    query[["query.cond"]]  <- condition
   if (!is.null(intervention)) query[["query.intr"]]  <- intervention
   if (!is.null(sponsor))      query[["query.spons"]] <- sponsor
 
-  studies    <- list()
-  page_token <- NULL
-
-  repeat {
-    if (length(studies) >= max_studies) break
-    if (!is.null(page_token)) query[["pageToken"]] <- page_token
-
-    resp <- tryCatch(
-      GET(BASE_API_URL, API_HEADERS, query = query, timeout(30)),
-      error = function(e) { message("Request failed: ", e$message); NULL }
-    )
-    if (is.null(resp) || http_error(resp)) {
-      message("API error: HTTP ", status_code(resp))
-      break
-    }
-
-    data  <- fromJSON(content(resp, "text", encoding = "UTF-8"), simplifyVector = FALSE)
-    batch <- data$studies %||% list()
-    if (length(batch) == 0) break
-
-    for (raw in batch) {
-      if (length(studies) >= max_studies) break
-      parsed <- .parse_study(raw)
-      if (length(parsed$docs) > 0) studies <- c(studies, list(parsed))
-    }
-
-    page_token <- data$nextPageToken
-    if (is.null(page_token)) break
-
-    Sys.sleep(0.4)  # respect rate limit
+  resp <- tryCatch(
+    GET(BASE_API_URL, API_HEADERS, query = query, timeout(30)),
+    error = function(e) { message("Request failed: ", e$message); NULL }
+  )
+  if (is.null(resp) || http_error(resp)) {
+    message("API error: HTTP ", status_code(resp))
+    return(list())
   }
 
-  studies
+  data  <- fromJSON(content(resp, "text", encoding = "UTF-8"), simplifyVector = FALSE)
+  batch <- data$studies %||% list()
+
+  # aggFilters already guarantees these studies have the requested doc types;
+  # parse and return without re-checking docs (avoids infinite pagination)
+  lapply(batch[seq_len(min(length(batch), max_studies))], .parse_study)
 }
 
 # ---------------------------------------------------------------------------
