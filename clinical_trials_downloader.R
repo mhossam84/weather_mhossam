@@ -41,10 +41,10 @@ DOC_TYPE_LABELS <- c(
 # ---------------------------------------------------------------------------
 
 .parse_study <- function(study) {
-  proto      <- study$protocolSection
-  id_mod     <- proto$identificationModule
+  proto       <- study$protocolSection
+  id_mod      <- proto$identificationModule
   sponsor_mod <- proto$sponsorCollaboratorsModule
-  docs_mod   <- proto$largeDocumentModule
+  docs_mod    <- study$documentSection$largeDocumentModule  # NOT under protocolSection
 
   list(
     nct_id       = id_mod$nctId %||% "",
