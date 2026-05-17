@@ -96,50 +96,72 @@ get_study_by_nct_id <- function(nct_id) {
 #' @param intervention Character. Drug/intervention (e.g. "pembrolizumab").
 #' @param sponsor      Character. Sponsor name (e.g. "Pfizer").
 #' @param doc_types    Character vector. Any of "protocol", "sap", "icf".
-#' @param max_studies  Integer. Maximum results to return.
+#' @param max_studies  Integer or Inf. Cap on results; Inf fetches everything.
 #' @return List of parsed study records.
 search_studies_with_documents <- function(
     condition    = NULL,
     intervention = NULL,
     sponsor      = NULL,
     doc_types    = "protocol",
-    max_studies  = 10
+    max_studies  = Inf
 ) {
   agg_codes  <- unlist(DOC_AGG_CODES[doc_types], use.names = FALSE)
   agg_filter <- paste0("docs:", paste(agg_codes, collapse = ","))
 
   query <- list(
     format     = "json",
-    pageSize   = min(max_studies, 100),  # fetch exactly what we need in one call
+    pageSize   = 100,
     aggFilters = agg_filter
   )
   if (!is.null(condition))    query[["query.cond"]]  <- condition
   if (!is.null(intervention)) query[["query.intr"]]  <- intervention
   if (!is.null(sponsor))      query[["query.spons"]] <- sponsor
 
-  resp <- tryCatch(
-    GET(BASE_API_URL, API_HEADERS, query = query, timeout(30)),
-    error = function(e) { message("Request failed: ", e$message); NULL }
-  )
-  if (is.null(resp) || http_error(resp)) {
-    message("API error: HTTP ", status_code(resp))
-    return(list())
+  # Phase 1: paginate through search results to collect NCT IDs
+  nct_ids    <- character(0)
+  page_token <- NULL
+
+  repeat {
+    if (length(nct_ids) >= max_studies) break
+    if (!is.null(page_token)) query[["pageToken"]] <- page_token
+
+    resp <- tryCatch(
+      GET(BASE_API_URL, API_HEADERS, query = query, timeout(30)),
+      error = function(e) { message("Request failed: ", e$message); NULL }
+    )
+    if (is.null(resp) || http_error(resp)) {
+      message("API error: HTTP ", status_code(resp)); break
+    }
+
+    data  <- fromJSON(content(resp, "text", encoding = "UTF-8"), simplifyVector = FALSE)
+
+    if (length(nct_ids) == 0) {
+      total <- data$totalCount %||% "?"
+      message("  API reports ", total, " matching studies total.")
+    }
+
+    for (raw in data$studies %||% list()) {
+      id <- raw$protocolSection$identificationModule$nctId %||% ""
+      if (nchar(id) > 0) nct_ids <- c(nct_ids, id)
+      if (length(nct_ids) >= max_studies) break
+    }
+
+    page_token <- data$nextPageToken
+    if (is.null(page_token)) break
+    Sys.sleep(0.3)
   }
 
-  data  <- fromJSON(content(resp, "text", encoding = "UTF-8"), simplifyVector = FALSE)
-  batch <- data$studies %||% list()
-  batch <- batch[seq_len(min(length(batch), max_studies))]
+  if (length(nct_ids) == 0) return(list())
 
-  # Phase 2: the search endpoint returns trimmed data (no largeDocumentModule).
-  # Re-fetch each study individually to get the full record including doc metadata.
-  message("  Fetching full records for ", length(batch), " study/studies ...")
+  # Phase 2: fetch each study individually to get documentSection (not in search response)
+  message("  Fetching full records: 0/", length(nct_ids), " ...")
   studies <- list()
-  for (raw in batch) {
-    nct_id <- raw$protocolSection$identificationModule$nctId %||% ""
-    if (nchar(nct_id) == 0) next
-    full <- get_study_by_nct_id(nct_id)
+  for (i in seq_along(nct_ids)) {
+    if (i %% 10 == 0 || i == length(nct_ids))
+      message("  Fetching full records: ", i, "/", length(nct_ids), " ...")
+    full <- get_study_by_nct_id(nct_ids[[i]])
     if (!is.null(full)) studies <- c(studies, list(full))
-    Sys.sleep(0.3)
+    Sys.sleep(0.5)
   }
   studies
 }
@@ -284,8 +306,8 @@ search_and_download <- function(
     condition    = NULL,
     intervention = NULL,
     sponsor      = NULL,
-    doc_types    = "protocol",
-    max_studies  = 5,
+    doc_types    = c("protocol", "sap", "icf"),
+    max_studies  = Inf,
     download     = FALSE,
     output_dir   = "./clinical_trial_docs"
 ) {
@@ -294,7 +316,7 @@ search_and_download <- function(
   if (!is.null(intervention)) message("  Intervention: ", intervention)
   if (!is.null(sponsor))      message("  Sponsor:      ", sponsor)
   message("  Doc types:    ", paste(doc_types, collapse = ", "))
-  message("  Max studies:  ", max_studies)
+  message("  Max studies:  ", if (is.infinite(max_studies)) "all" else max_studies)
 
   studies <- search_studies_with_documents(
     condition    = condition,
@@ -326,12 +348,16 @@ search_and_download <- function(
   if (download) {
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
     message("Downloading to ", output_dir, "/ ...")
-    total <- 0L
-    for (s in studies) {
-      message("\n", s$nct_id, " - ", s$title)
-      total <- total + download_study_documents(s, output_dir, doc_types)
+    total_files <- 0L
+    for (i in seq_along(studies)) {
+      s <- studies[[i]]
+      message("\n[", i, "/", length(studies), "] ", s$nct_id, " - ", s$title)
+      total_files <- total_files + download_study_documents(s, output_dir, doc_types)
     }
-    message("\nTotal files downloaded: ", total)
+    message("\n--- Done ---")
+    message("Studies processed: ", length(studies))
+    message("Files downloaded:  ", total_files)
+    message("Output directory:  ", normalizePath(output_dir))
   }
 
   invisible(studies)
