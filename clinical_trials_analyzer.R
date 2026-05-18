@@ -371,3 +371,166 @@ export_results <- function(df, file = "study_classification.csv") {
   }
   invisible(out)
 }
+
+# ---------------------------------------------------------------------------
+# Folder organisation by phase and study type
+# ---------------------------------------------------------------------------
+
+PHASE_FOLDERS <- c(
+  "Phase 1" = "Phase_1",
+  "Phase 2" = "Phase_2",
+  "Phase 3" = "Phase_3",
+  "Phase 4" = "Phase_4",
+  "Other"   = "Other_Phase",
+  "N/A"     = "Phase_NA"
+)
+
+STUDY_TYPE_FOLDERS <- c(
+  "First-in-Human (FIH)"          = "FIH",
+  "Single Ascending Dose (SAD)"   = "SAD",
+  "Multiple Ascending Dose (MAD)" = "MAD",
+  "Drug-Drug Interaction (DDI)"   = "DDI",
+  "Hepatic Impairment"            = "Hepatic_Impairment",
+  "Renal Impairment"              = "Renal_Impairment",
+  "Food Effect"                   = "Food_Effect",
+  "Bioequivalence / BA"           = "Bioequivalence_BA",
+  "Mass Balance / ADME"           = "Mass_Balance_ADME",
+  "QTc / Cardiac Safety"          = "QTc_Cardiac_Safety",
+  "Dose Finding / Ranging"        = "Dose_Finding_Ranging",
+  "Dose Escalation"               = "Dose_Escalation",
+  "Pivotal / Confirmatory"        = "Pivotal_Confirmatory",
+  "Proof of Concept (PoC)"        = "Proof_of_Concept",
+  "Open-Label Extension (OLE)"    = "Open_Label_Extension",
+  "Long-Term Safety"              = "Long_Term_Safety",
+  "Pediatric"                     = "Pediatric",
+  "Geriatric / Elderly"           = "Geriatric_Elderly",
+  "Special Population"            = "Special_Population",
+  "Phase 2 Efficacy"              = "Phase_2_Efficacy",
+  "Phase 3 Efficacy"              = "Phase_3_Efficacy",
+  "Observational / Registry"      = "Observational_Registry",
+  "Other"                         = "Other_Study_Type"
+)
+
+.phase_folder <- function(phase_group) {
+  PHASE_FOLDERS[[phase_group %||% "N/A"]] %||% "Phase_NA"
+}
+
+# Return the folder name for the primary (first) matched study type
+.primary_type_folder <- function(study_types_str) {
+  if (is.na(study_types_str) || !nchar(trimws(study_types_str)))
+    return(STUDY_TYPE_FOLDERS[["Other"]])
+  primary <- trimws(strsplit(study_types_str, " \\| ")[[1]][1])
+  STUDY_TYPE_FOLDERS[[primary]] %||% gsub("[^A-Za-z0-9]", "_", primary)
+}
+
+#' Preview the folder structure that organize_by_classification() would create.
+#'
+#' @param df  data.frame from classify_studies() or analyze_sponsor().
+preview_organization <- function(df) {
+  tbl <- table(
+    Phase      = sapply(df$phase_group,  .phase_folder),
+    Study_Type = sapply(df$study_types, .primary_type_folder)
+  )
+  cat("\nFolder structure preview (Phase / Study Type — study count):\n")
+  cat(strrep("-", 60), "\n")
+  for (ph in rownames(tbl)) {
+    ph_total <- sum(tbl[ph, ])
+    cat(sprintf("  %s/  (%d studies)\n", ph, ph_total))
+    for (st in colnames(tbl)) {
+      if (tbl[ph, st] > 0)
+        cat(sprintf("    %-40s %d\n", paste0(st, "/"), tbl[ph, st]))
+    }
+  }
+  invisible(tbl)
+}
+
+#' Copy downloaded PDFs into Phase/StudyType/NCT_ID folder hierarchy.
+#'
+#' @param df         data.frame from classify_studies() or analyze_sponsor().
+#' @param source_dir Directory where PDFs were saved by search_and_download()
+#'                   (contains one sub-folder per NCT ID).
+#' @param output_dir Root of the organised output tree.
+#' @param copy       TRUE = copy files (safe); FALSE = move files (faster).
+#' @return Invisibly, a data.frame log of every file operation.
+#'
+#' @examples
+#' df <- analyze_sponsor("Pfizer")
+#' organize_by_classification(df, source_dir = "./pfizer_docs",
+#'                                output_dir  = "./pfizer_organized")
+organize_by_classification <- function(df,
+                                       source_dir,
+                                       output_dir = "./organized_docs",
+                                       copy       = TRUE) {
+  source_dir <- normalizePath(source_dir, mustWork = FALSE)
+  output_dir <- normalizePath(output_dir, mustWork = FALSE)
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+  log_rows <- list()
+  n_files  <- 0L
+  n_skip   <- 0L
+
+  for (i in seq_len(nrow(df))) {
+    row    <- df[i, ]
+    nct_id <- row$nct_id
+    if (is.na(nct_id) || !nchar(nct_id)) next
+
+    src_dir <- file.path(source_dir, nct_id)
+    if (!dir.exists(src_dir)) {
+      n_skip <- n_skip + 1L
+      log_rows[[length(log_rows) + 1]] <- data.frame(
+        nct_id = nct_id, file = NA, phase_folder = NA,
+        type_folder = NA, status = "no_source_folder", stringsAsFactors = FALSE
+      )
+      next
+    }
+
+    ph_folder  <- .phase_folder(row$phase_group)
+    typ_folder <- .primary_type_folder(row$study_types)
+    dst_dir    <- file.path(output_dir, ph_folder, typ_folder, nct_id)
+    dir.create(dst_dir, recursive = TRUE, showWarnings = FALSE)
+
+    files <- list.files(src_dir, full.names = TRUE, recursive = FALSE)
+    for (f in files) {
+      dst_file <- file.path(dst_dir, basename(f))
+      ok <- if (copy) file.copy(f, dst_file, overwrite = TRUE)
+            else      file.rename(f, dst_file)
+      n_files <- n_files + 1L
+      log_rows[[length(log_rows) + 1]] <- data.frame(
+        nct_id      = nct_id,
+        file        = basename(f),
+        phase_folder = ph_folder,
+        type_folder  = typ_folder,
+        status       = if (ok) "ok" else "failed",
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+
+  # Write index with classification + destination path
+  index <- merge(
+    df[, c("nct_id","brief_title","lead_sponsor","phase_group",
+           "therapeutic_area","study_types","status","conditions",
+           "doc_types_available")],
+    data.frame(
+      nct_id       = sapply(df$nct_id, identity),
+      phase_folder = sapply(df$phase_group,  .phase_folder),
+      type_folder  = sapply(df$study_types, .primary_type_folder),
+      stringsAsFactors = FALSE
+    ),
+    by = "nct_id", all.x = TRUE
+  )
+  index$destination_path <- file.path(
+    output_dir, index$phase_folder, index$type_folder, index$nct_id
+  )
+  index_file <- file.path(output_dir, "study_index.csv")
+  write.csv(index, index_file, row.names = FALSE)
+
+  op <- if (copy) "copied" else "moved"
+  message("\nOrganisation complete.")
+  message("  Files ", op, ":          ", n_files)
+  message("  Studies skipped        ", n_skip, "  (not yet downloaded)")
+  message("  Output directory:      ", output_dir)
+  message("  Index CSV:             ", index_file)
+
+  invisible(do.call(rbind, log_rows))
+}
