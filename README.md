@@ -30,6 +30,26 @@ npm run dev
 
 Open http://localhost:5173 on your phone or a mobile viewport in devtools.
 
+## Deploying (to get a link you can open on your phone)
+
+The repo is set up to deploy as a single Vercel project — the frontend as a
+static build, the backend as a serverless function under `/api` (see
+`vercel.json`, `api/index.js`, `backend/app.js`). No separate hosting for
+the API is needed.
+
+1. Go to https://vercel.com and sign in with your GitHub account (free,
+   no credit card required for the Hobby tier).
+2. Click **Add New → Project**, and import `mhossam84/weather_mhossam`.
+3. Set the branch to `claude/world-cup-highlights-app-8yoql6` (or whichever
+   branch you've merged this into).
+4. Leave the framework preset as detected / "Other" — `vercel.json` already
+   defines the build command, output directory, and API rewrite, so you
+   shouldn't need to change any project settings.
+5. Click **Deploy**. Vercel gives you a URL like
+   `https://weather-mhossam.vercel.app` — open that on your phone.
+
+Every future push to that branch redeploys automatically.
+
 ## How it works
 
 - `GET /api/matches?q=...` — returns the match list, optionally filtered by
